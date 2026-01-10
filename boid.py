@@ -17,9 +17,8 @@ class Boid(Vehicle):
     can_wrap = False
     edge_distance_pct = 5
     
-    # --- 新增：避障權重 (由 2.0 提取出來變成變數) ---
+    # 避障權重
     avoid_weight = 5.0 
-    ###############
 
     def __init__(self):
         Boid.set_boundary(Boid.edge_distance_pct)
@@ -37,7 +36,6 @@ class Boid(Vehicle):
                          Boid.max_force, Boid.can_wrap)
 
         self.rect = self.image.get_rect(center=self.position)
-
         self.debug = Boid.debug
 
     def separation(self, boids):
@@ -67,67 +65,94 @@ class Boid(Vehicle):
         steering = self.clamp_force(steering)
         return steering / 100
 
-    # --- 修改：使用 self.avoid_weight ---
+    # --- 輔助：計算點到線段最近點 ---
+    def get_closest_point_on_segment(self, p, a, b):
+        ap = p - a
+        ab = b - a
+        ab_len_sq = ab.length_squared()
+        if ab_len_sq == 0:
+            return a
+        t = ap.dot(ab) / ab_len_sq
+        t = max(0, min(1, t))
+        return a + ab * t
+
+    # --- 修改後的避障邏輯 (Convex Hull) ---
     def avoid_obstacles(self, clusters):
         steering = pg.Vector2()
         
-        for rect in clusters:
-            # 1. 建立一個稍微擴大的偵測區 (Inflate)
-            # 這裡設定比 perception 大一點，確保船隻在還沒撞到前就開始有反應
-            detect_box = rect.inflate(self.perception * 1.5, self.perception * 1.5)
-            
-            # 2. 檢查船隻是否進入了這個偵測區
-            if detect_box.collidepoint(self.position):
-                
-                # --- 關鍵演算法：尋找矩形上距離我最近的點 (Clamping) ---
-                # 這能確保斥力永遠是垂直於矩形表面的（最有效率的避讓方向）
-                closest_x = max(rect.left, min(self.position.x, rect.right))
-                closest_y = max(rect.top, min(self.position.y, rect.bottom))
-                closest_point = pg.Vector2(closest_x, closest_y)
-                
-                # 計算我與最近點的向量 (這就是我要逃離的方向)
-                diff = self.position - closest_point
-                
-                dist = diff.length()
-                
-                # 如果我已經在矩形內部 (dist == 0) 或者距離非常近
-                if dist < 0.1:
-                    # 緊急情況：隨機給一個強大斥力或是沿著目前速度反向
-                    diff = -self.velocity 
-                    diff.scale_to_length(self.max_force * 2)
-                else:
-                    # 距離越近，斥力越強 (指數級增強效果更好)
-                    # 這裡使用 1/dist 的平方或是簡單的線性加權
-                    force_magnitude = (1.0 / dist) * 50 
-                    diff.scale_to_length(force_magnitude)
-                
-                steering += diff
+        for polygon in clusters:
+            if len(polygon) < 2:
+                # 單點處理
+                if len(polygon) == 1:
+                    diff = self.position - polygon[0]
+                    if diff.length() < self.perception:
+                         steering += diff.normalize() * self.max_force
+                continue
 
-        if steering.length() > 0:
-            steering = self.clamp_force(steering)
-            steering *= self.avoid_weight  # 乘上權重
+            # 遍歷多邊形每一邊
+            closest_dist_to_poly = float('inf')
+            closest_point_on_poly = pg.Vector2()
             
+            for i in range(len(polygon)):
+                p1 = polygon[i]
+                p2 = polygon[(i + 1) % len(polygon)] # 連回起點
+                
+                c_point = self.get_closest_point_on_segment(self.position, p1, p2)
+                dist = self.position.distance_to(c_point)
+                
+                if dist < closest_dist_to_poly:
+                    closest_dist_to_poly = dist
+                    closest_point_on_poly = c_point
+
+            # 產生避障力
+            if closest_dist_to_poly < self.perception:
+                diff = self.position - closest_point_on_poly
+                
+                if closest_dist_to_poly < 0.1:
+                    # 極端接近時的反向力
+                    diff = -self.velocity 
+                    steering += diff.normalize() * self.max_force * 5
+                else:
+                    strength = (self.perception / closest_dist_to_poly) * 2
+                    steering += diff.normalize() * strength
+                    
+                    # 切線力 (解決垂直撞牆)
+                    if self.velocity.length() > 0:
+                        angle_diff = self.velocity.angle_to(diff)
+                        if abs(angle_diff) > 150:
+                            tangent = diff.rotate(90)
+                            steering += tangent * 3
+
         return steering
 
-    def update(self, dt, boids, clusters=None): # 改名為 clusters 比較語意化
+    def update(self, dt, boids, clusters=None):
         steering = pg.Vector2()
 
+        # 0. 邊界檢查
         if not self.can_wrap:
             steering += self.avoid_edge()
 
-        neighbors = self.get_neighbors(boids)
-        if neighbors:
-            separation = self.separation(neighbors)
-            alignment = self.alignment(neighbors)
-            cohesion = self.cohesion(neighbors)
-            steering += separation + alignment + cohesion
-
+        # 1. 避障力
+        avoidance = pg.Vector2()
         if clusters:
-            avoidance = self.avoid_obstacles(clusters) # 傳入 clusters
-            steering += avoidance
+            avoidance = self.avoid_obstacles(clusters)
 
-        super().update(dt, steering)
+        # 2. 優先級邏輯
+        if avoidance.length() > 0.5: 
+            steering += avoidance * self.avoid_weight
+            neighbors = self.get_neighbors(boids)
+            if neighbors:
+                steering += self.separation(neighbors) * 2
+        else:
+            neighbors = self.get_neighbors(boids)
+            if neighbors:
+                separation = self.separation(neighbors)
+                alignment = self.alignment(neighbors)
+                cohesion = self.cohesion(neighbors)
+                steering += separation + alignment + cohesion
         
+        super().update(dt, steering)
+
     def get_neighbors(self, boids):
         neighbors = []
         for boid in boids:
