@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  boids:
+    container_name: boids-demo
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
+    working_dir: /workspace
+    entrypoint: ["/workspace/entrypoint.sh"]
+    volumes:
+      - .:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}
+    tty: true
+    restart: unless-stopped
